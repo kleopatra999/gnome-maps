@@ -112,9 +112,43 @@ const RouteQuery = new Lang.Class({
         return this._latest;
     },
 
+    get time() {
+        return this._time;
+    },
+
+    set time(time) {
+        this._time = time;
+        this.notify('points');
+    },
+
+    get date() {
+        return this._date;
+    },
+
+    set date(date) {
+        this._date = date;
+        /* only notify change when an actual date was set, when resetting time
+         * time and date (to use "Leave Now" routing) time would be set to null
+         * triggering an update */
+        if (date)
+            this.notify('points');
+    },
+
+    get arriveBy() {
+        return this._arriveBy;
+    },
+
+    set arriveBy(arriveBy) {
+        this._arriveBy = arriveBy;
+        if (this._time)
+            this.notify('points');
+    },
+
     _init: function(args) {
         this.parent(args);
         this._points = [];
+        this._time = null;
+        this._date = null;
         this.reset();
     },
 
