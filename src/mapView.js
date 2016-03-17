@@ -89,7 +89,7 @@ const MapView = new Lang.Class({
     },
 
     set routeVisible(value) {
-        let isValid = Application.routeService.query.isValid();
+        let isValid = Application.routeQuery.isValid();
 
         this._routeLayer.visible = value && isValid;
         this._instructionMarkerLayer.visible = value && isValid;
@@ -189,7 +189,7 @@ const MapView = new Lang.Class({
 
     _connectRouteSignals: function() {
         let route = Application.routeService.route;
-        let query = Application.routeService.query;
+        let query = Application.routeQuery;
 
         route.connect('update', this.showRoute.bind(this, route));
         route.connect('reset', (function() {
@@ -411,7 +411,7 @@ const MapView = new Lang.Class({
     },
 
     _showStoredRoute: function(stored) {
-        let query = Application.routeService.query;
+        let query = Application.routeQuery;
         let route = Application.routeService.route;
 
         Application.routeService.storedRoute = stored.route;
@@ -465,7 +465,7 @@ const MapView = new Lang.Class({
 
     _showDestinationTurnpoints: function() {
         let route = Application.routeService.route;
-        let query = Application.routeService.query;
+        let query = Application.routeQuery;
         let pointIndex = 0;
 
         this._instructionMarkerLayer.remove_all();
