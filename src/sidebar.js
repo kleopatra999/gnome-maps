@@ -20,8 +20,11 @@
  *         Mattias Bengtsson <mattias.jc.bengtsson@gmail.com>
  */
 
+const C_ = imports.gettext.dgettext;
 const Cairo = imports.cairo;
 const Gdk = imports.gi.Gdk;
+const Gio = imports.gi.Gio;
+const GLib = imports.gi.GLib;
 const GObject = imports.gi.GObject;
 const Gtk = imports.gi.Gtk;
 const Lang = imports.lang;
@@ -33,7 +36,16 @@ const PlaceStore  = imports.placeStore;
 const RouteEntry = imports.routeEntry;
 const RouteQuery = imports.routeQuery;
 const StoredRoute = imports.storedRoute;
+const TransitItineraryRow = imports.transitItineraryRow;
+const TransitOptions = imports.transitOptions;
+const TransitPlan = imports.transitPlan;
 const Utils = imports.utils;
+
+// in org.gnome.desktop.interface
+const CLOCK_FORMAT_KEY = 'clock-format';
+
+let _desktopSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.interface' });
+let clockFormat = _desktopSettings.get_string(CLOCK_FORMAT_KEY);
 
 const Sidebar = new Lang.Class({
     Name: 'Sidebar',
@@ -48,40 +60,77 @@ const Sidebar = new Lang.Class({
                         'modeBikeToggle',
                         'modeCarToggle',
                         'modePedestrianToggle',
-                        'timeInfo' ],
+                        'modeTransitToggle',
+                        'timeInfo',
+                        'linkButtonStack',
+                        'transitWindow',
+                        'transitRevealer',
+                        'transitHeader',
+                        'transitTimeOptionsComboBox',
+                        'transitTimeEntry',
+                        'transitDateButton',
+                        'transitDateCalendar',
+                        'transitParametersMenuButton',
+                        'transitListStack',
+                        'transitOverviewListBox',
+                        'transitItineraryListBox',
+                        'transitItineraryBackButton',
+                        'transitItineraryTimeLabel',
+                        'transitItineraryDurationLabel',
+                        'busCheckButton',
+                        'tramCheckButton',
+                        'trainCheckButton',
+                        'subwayCheckButton',
+                        'ferryCheckButton' ],
 
     _init: function(mapView) {
         this.parent({ transition_type: Gtk.RevealerTransitionType.SLIDE_LEFT });
 
         this._mapView = mapView;
 
+        this._query = Application.routeQuery;
         this._initInstructionList();
-
+        this._initTransitOptions();
         this._initTransportationToggles(this._modePedestrianToggle,
                                         this._modeBikeToggle,
-                                        this._modeCarToggle);
+                                        this._modeCarToggle,
+                                        this._modeTransitToggle);
+
         this._initQuerySignals();
-
-        let query = Application.routeService.query;
-
-        query.addPoint(0);
-        query.addPoint(1);
+        this._query.addPoint(0);
+        this._query.addPoint(1);
+        this._switchRoutingMode(RouteQuery.Transportation.CAR);
     },
 
-    _initTransportationToggles: function(pedestrian, bike, car) {
-        let query = Application.routeService.query;
+    _initTransportationToggles: function(pedestrian, bike, car, transit) {
         let transport = RouteQuery.Transportation;
 
         let onToggle = function(mode, button) {
-            if (button.active && query.transportation !== mode)
-                query.transportation = mode;
+            Utils.debug('onToggle: ' + mode + ', query.mode: ' + this._query.transportation);
+
+            let previousMode = this._query.transportation;
+
+            /* if the transportation mode changes to/from transit
+               change the routing engine */
+            if (button.active &&
+                ((mode !== transport.TRANSIT
+                  && previousMode === transport.TRANSIT)
+                 || (mode === transport.TRANSIT
+                     && previousMode !== transport.TRANSIT))) {
+                Utils.debug('switching routing mode');
+                this._switchRoutingMode(mode);
+            }
+
+            if (button.active && previousMode !== mode)
+                this._query.transportation = mode;
         };
         pedestrian.connect('toggled', onToggle.bind(this, transport.PEDESTRIAN));
         car.connect('toggled', onToggle.bind(this, transport.CAR));
         bike.connect('toggled', onToggle.bind(this, transport.BIKE));
+        transit.connect('toggled', onToggle.bind(this, transport.TRANSIT))
 
         let setToggles = function() {
-            switch(query.transportation) {
+            switch(Application.routeQuery.transportation) {
             case transport.PEDESTRIAN:
                 pedestrian.active = true;
                 break;
@@ -91,21 +140,43 @@ const Sidebar = new Lang.Class({
             case transport.BIKE:
                 bike.active = true;
                 break;
+            case transport.TRANSIT:
+                transit.active = true;
+                break;
             }
         };
 
         setToggles();
-        query.connect('notify::transportation', setToggles);
+        this._query.connect('notify::transportation', setToggles);
+    },
+
+    _switchRoutingMode: function(mode) {
+        let graphHopper = Application.routeService;
+        let openTripPlanner = Application.openTripPlanner;
+
+        if (mode === RouteQuery.Transportation.TRANSIT) {
+            Utils.debug('switching to transit');
+            graphHopper.disconnect();
+            openTripPlanner.connect();
+            this._linkButtonStack.visible_child_name = 'openTripPlanner';
+            this._resetTransitOptions();
+            this._transitRevealer.reveal_child = true;
+            this._clearInstructions();
+        } else {
+            Utils.debug('switch from transit');
+            openTripPlanner.disconnect();
+            graphHopper.connect();
+            this._linkButtonStack.visible_child_name = 'graphHopper';
+            this._transitRevealer.reveal_child = false;
+        }
     },
 
     _initQuerySignals: function() {
-        let query = Application.routeService.query;
-
-        query.connect('point-added', (function(obj, point, index) {
+        this._query.connect('point-added', (function(obj, point, index) {
             this._createRouteEntry(index, point);
         }).bind(this));
 
-        query.connect('point-removed', (function(obj, point, index) {
+        this._query.connect('point-removed', (function(obj, point, index) {
             let row = this._entryList.get_row_at_index(index);
             row.destroy();
         }).bind(this));
@@ -133,17 +204,17 @@ const Sidebar = new Lang.Class({
         if (type === RouteEntry.Type.FROM) {
             routeEntry.button.connect('clicked', (function() {
                 let lastIndex = this._entryList.get_children().length;
-                Application.routeService.query.addPoint(lastIndex - 1);
+                this._query.addPoint(lastIndex - 1);
             }).bind(this));
 
             this.bind_property('child-revealed',
                                routeEntry.entry, 'has_focus',
                                GObject.BindingFlags.DEFAULT);
         } else if (type === RouteEntry.Type.VIA) {
-            routeEntry.button.connect('clicked', function() {
+            routeEntry.button.connect('clicked', (function() {
                 let row = routeEntry.get_parent();
-                Application.routeService.query.removePoint(row.get_index());
-            });
+                this._query.removePoint(row.get_index());
+            }).bind(this));
         }
 
         this._initRouteDragAndDrop(routeEntry);
@@ -151,19 +222,19 @@ const Sidebar = new Lang.Class({
 
     _initInstructionList: function() {
         let route = Application.routeService.route;
-        let query = Application.routeService.query;
+        let transitPlan = Application.openTripPlanner.plan;
 
         route.connect('reset', (function() {
             this._clearInstructions();
 
             let length = this._entryList.get_children().length;
             for (let index = 1; index < (length - 1); index++) {
-                query.removePoint(index);
+                this._query.removePoint(index);
             }
         }).bind(this));
 
-        query.connect('notify', (function() {
-            if (query.isValid())
+        this._query.connect('notify', (function() {
+            if (this._query.isValid())
                 this._instructionStack.visible_child = this._instructionSpinner;
             else
                 this._clearInstructions();
@@ -181,11 +252,11 @@ const Sidebar = new Lang.Class({
 
             this._storeRouteTimeoutId = Mainloop.timeout_add(5000, (function() {
                 let placeStore = Application.placeStore;
-                let places = query.filledPoints.map(function(point) {
+                let places = this._query.filledPoints.map(function(point) {
                     return point.place;
                 });
                 let storedRoute = new StoredRoute.StoredRoute({
-                    transportation: query.transportation,
+                    transportation: this._query.transportation,
                     route: route,
                     places: places,
                     geoclue: Application.geoclue
@@ -213,6 +284,266 @@ const Sidebar = new Lang.Class({
             if (row)
                 this._mapView.showTurnPoint(row.turnPoint);
         }).bind(this));
+
+        transitPlan.connect('update', (function() {
+            this._clearTransitOverview();
+            this._showTransitOverview();
+            this._populateTransitItineraryOverview();
+        }).bind(this));
+
+        /* use list separators for the transit itinerary overview list */
+        this._transitOverviewListBox.set_header_func((function(row, prev) {
+            if (prev)
+                row.set_header(new Gtk.Separator());
+        }).bind(this));
+
+        this._transitOverviewListBox.connect('row-activated',
+                                             this._onItineraryActivated.bind(this));
+        this._transitItineraryBackButton.connect('clicked',
+                                                 this._showTransitOverview.bind(this));
+
+    },
+
+    _clearTransitOverview: function() {
+        let listBox = this._transitOverviewListBox;
+        listBox.forall(listBox.remove.bind(listBox));
+
+        this._instructionStack.visible_child = this._transitWindow;
+        this._timeInfo.label = '';
+        this._distanceInfo.label = '';
+    },
+
+    _showTransitOverview: function() {
+        this._transitListStack.visible_child_name = 'overview';
+        this._transitHeader.visible_child_name = 'options';
+    },
+
+    _showTransitItineraryView: function() {
+        this._transitListStack.visible_child_name = 'itinerary';
+        this._transitHeader.visible_child_name = 'itinerary-header';
+    },
+
+    _populateTransitItineraryOverview: function() {
+        let plan = Application.openTripPlanner.plan;
+
+        plan.itineraries.forEach((function(itinerary) {
+            let row =
+                new TransitItineraryRow.TransitItineraryRow({ visible: true,
+                                                              itinerary: itinerary });
+            this._transitOverviewListBox.add(row);
+        }).bind(this));
+    },
+
+    _onItineraryActivated: function(listBox, row) {
+        this._populateTransitItinerary(row.itinerary);
+        this._showTransitItineraryView();
+        this._transitOverviewListBox.unselect_all();
+    },
+
+    _populateTransitItinerary: function(itinerary) {
+        this._transitItineraryTimeLabel.label =
+            itinerary.prettyPrintTimeInterval();
+        this._transitItineraryDurationLabel.label =
+            itinerary.prettyPrintDuration();
+
+        /* TODO: populate list of itinerary legs */
+    },
+
+    _initTransitOptions: function() {
+        this._transitTimeOptionsComboBox.connect('changed',
+            this._onTransitTimeOptionsComboboxChanged.bind(this));
+        this._transitTimeEntry.connect('activate',
+            this._onTransitTimeEntryActivated.bind(this));
+        /* trigger an update of the query time as soon as focus leave the time
+         * entry, to allow the user to enter a time before selecting start
+         * and destination without having to press enter */
+        this._transitTimeEntry.connect('focus-out-event',
+            this._onTransitTimeEntryActivated.bind(this));
+        this._transitDateButton.popover.get_child().connect('day-selected-double-click',
+            this._onTransitDateCalenderDaySelected.bind(this));
+        this._transitDateButton.connect('toggled',
+            this._onTransitDateButtonToogled.bind(this));
+        this._transitParametersMenuButton.connect('toggled',
+            this._onTransitParametersToggled.bind(this))
+    },
+
+    _resetTransitOptions: function() {
+        /* reset to indicate departure now and forget any previous manually
+         * set time and date */
+        this._transitTimeOptionsComboBox.active_id = 'leaveNow';
+        this._timeSelected = false;
+        this._dateSelected = false;
+    },
+
+    _onTransitTimeOptionsComboboxChanged: function() {
+        if (this._transitTimeOptionsComboBox.active_id === 'leaveNow') {
+            this._transitTimeEntry.visible = false;
+            this._transitDateButton.visible = false;
+            this._query.arriveBy = false;
+            this._query.time = null;
+            this._query.date = null;
+        } else {
+            this._transitTimeEntry.visible = true;
+            this._transitDateButton.visible = true;
+
+            if (!this._timeSelected)
+                this._updateTransitTimeEntry(GLib.DateTime.new_now_local());
+
+            if (!this._dateSelected)
+                this._updateTransitDateButton(GLib.DateTime.new_now_local());
+
+            if (this._transitTimeOptionsComboBox.active_id === 'arriveBy') {
+                this._query.arriveBy = true;
+            } else {
+                this._query.arriveBy = false;
+                /* TODO: if the user hasn't already manually entered a
+                 * time, fill in the current time in the time entry */
+            }
+        }
+    },
+
+    _parseTimeString: function(timeString) {
+        let pmSet = false;
+        let hours;
+        let mins;
+        /* remove extra whitespaces */
+        timeString = timeString.replace(/\s+/g, '');
+
+        if (timeString.endsWith('am')) {
+            timeString = timeString.substring(0, timeString.length - 2);
+        } else if (timeString.endsWith('pm')) {
+            timeString = timeString.substring(0, timeString.length - 2);
+            pmSet = true;
+        }
+
+        if (timeString.charAt(2) === ':' || timeString.charAt(1) === ':')
+            timeString = timeString.replace(':', '');
+        else if (timeString.charAt(2) === '\u2236' ||
+                 timeString.charAt(1) === '\u2236')
+            timeString = timeString.replace('\u2236', '');
+
+        if (timeString.length === 4) {
+            /* expect a full time specification (hours, minutes) */
+            hours = timeString.substring(0, 2);
+            mins = timeString.substring(2, 4);
+        } else if (timeString.length === 3) {
+            /* interpret a 3 digit string as h:mm */
+            hours = '0' + timeString.substring(0, 1);
+            mins = timeString.substring(1, 3);
+        } else if (timeString.length === 2) {
+            /* expect just the hour part */
+            hours = timeString.substring(0, 2);
+            mins = '00';
+        } else if (timeString.length === 1) {
+            /* expect just the hour part, one digit */
+            hours = '0' + timeString;
+            mins = '00';
+        } else {
+            /* this makes no sense, just bail out */
+            return null;
+        }
+
+        /* check if the parts can be interpreted as numbers */
+        if (hours % 1 === 0 && mins % 1 === 0) {
+            if (pmSet)
+                hours = parseInt(hours) + 12;
+
+            /* if the hours or minutes is out-of-range, bail out */
+            if (hours < 0 || hours > 24 || mins < 0 || mins > 59)
+                return null;
+
+            return hours + ':' + mins;
+        } else {
+            return null;
+        }
+    },
+
+    _updateTransitTimeEntry: function(time) {
+        if (clockFormat === '24h')
+            this._transitTimeEntry.text = time.format('%R');
+        else
+            this._transitTimeEntry.text = time.format('%r');
+    },
+
+    _onTransitTimeEntryActivated: function() {
+        let timeString = this._transitTimeEntry.text;
+
+        if (timeString && timeString.length > 0) {
+            timeString = this._parseTimeString(timeString);
+
+            Utils.debug('entered time parsed as: ' + timeString);
+
+            if (timeString) {
+                this._query.time = timeString;
+                /* remember that the user has selected a time */
+                this._timeSelected = true;
+            }
+        }
+    },
+
+    _updateTransitDateButton: function(date) {
+        /*
+         * Translators: this is a format string giving the equivalent to
+         * "may 29" according to the current locale's convensions.
+         */
+        this._transitDateButton.label =
+            date.format(C_("month-day-date", "%b %e"));
+    },
+
+    _onTransitDateCalenderDaySelected: function() {
+        let calendar = this._transitDateButton.popover.get_child();
+        let year = calendar.year;
+        let month = calendar.month + 1;
+        let day = calendar.day;
+        let date = year + '-' + month + '-' + day;
+
+        Utils.debug('day selected: ' + date);
+
+        this._query.date = date;
+        this._transitDateButton.active = false;
+        this._updateTransitDateButton(GLib.DateTime.new_local(year, month, day,
+                                                              0, 0, 0));
+        /* remember that the user has already selected a date */
+        this._dateSelected = true;
+    },
+
+    _onTransitDateButtonToogled: function() {
+        if (!this._transitDateButton.active)
+            this._onTransitDateCalenderDaySelected();
+    },
+
+    _createTransitOptions: function() {
+        let options = new TransitOptions.TransitOptions();
+        let busSelected = this._busCheckButton.active;
+        let tramSelected = this._tramCheckButton.active;
+        let trainSelected = this._trainCheckButton.active;
+        let subwaySelected = this._subwayCheckButton.active;
+        let ferrySelected = this._ferryCheckButton.active;
+
+        if (busSelected && tramSelected && trainSelected && subwaySelected &&
+            ferrySelected) {
+            options.showAllRouteTypes = true;
+        } else {
+            if (busSelected)
+                options.addRouteTypeToShow(TransitPlan.RouteType.BUS);
+            if (tramSelected)
+                options.addRouteTypeToShow(TransitPlan.RouteType.TRAM);
+            if (trainSelected)
+                options.addRouteTypeToShow(TransitPlan.RouteType.TRAIN);
+            if (subwaySelected)
+                options.addRouteTypeToShow(TransitPlan.RouteType.SUBWAY);
+            if (ferrySelected)
+                options.addRouteTypeToShow(TransitPlan.RouteType.FERRY);
+        }
+
+        return options;
+    },
+
+    _onTransitParametersToggled: function() {
+        if (!this._transitParametersMenuButton.active) {
+            let options = this._createTransitOptions();
+            this._query.transitOptions = options;
+        }
     },
 
     _clearInstructions: function() {
@@ -226,8 +557,7 @@ const Sidebar = new Lang.Class({
 
     // Iterate over points and establish the new order of places
     _reorderRoutePoints: function(srcIndex, destIndex) {
-        let query = Application.routeService.query;
-        let points = query.points;
+        let points = this._query.points;
         let srcPlace = this._draggedPoint.place;
 
         // Determine if we are swapping from "above" or "below"
@@ -235,19 +565,18 @@ const Sidebar = new Lang.Class({
 
         // Hold off on notifying the changes to query.points until
         // we have re-arranged the places.
-        query.freeze_notify();
+        this._query.freeze_notify();
 
         for (let i = destIndex; i !== (srcIndex + step); i += step) {
             // swap
             [points[i].place, srcPlace] = [srcPlace, points[i].place];
         }
 
-        query.thaw_notify();
+        this._query.thaw_notify();
     },
 
     _onDragDrop: function(row, context, x, y, time) {
-        let query = Application.routeService.query;
-        let srcIndex = query.points.indexOf(this._draggedPoint);
+        let srcIndex = this._query.points.indexOf(this._draggedPoint);
         let destIndex = row.get_index();
 
         this._reorderRoutePoints(srcIndex, destIndex);
