@@ -39,6 +39,7 @@ const Maps = imports.gi.GnomeMaps;
 const MapWalker = imports.mapWalker;
 const Place = imports.place;
 const PlaceMarker = imports.placeMarker;
+const RouteQuery = imports.routeQuery;
 const ShapeLayer = imports.shapeLayer;
 const StoredRoute = imports.storedRoute;
 const TurnPointMarker = imports.turnPointMarker;
@@ -85,15 +86,21 @@ const MapView = new Lang.Class({
     },
 
     get routeVisible() {
-        return this._routeLayer.visible || this._instructionMarkerLayer.visible;
+        return this._routeVisible || this._instructionMarkerLayer.visible;
     },
 
     set routeVisible(value) {
         let isValid = Application.routeQuery.isValid();
 
-        this._routeLayer.visible = value && isValid;
+        this._routeVisible = value && isValid;
+        this._routeLayers.forEach((function(routeLayer) {
+            Utils.debug('setting route layer visible: ' + (value && isValid));
+            routeLayer.visible = value && isValid;
+        }).bind(this));
         this._instructionMarkerLayer.visible = value && isValid;
+        Utils.debug('after instructionMarkerLayer visible');
         this.notify('routeVisible');
+        Utils.debug('after notify routeVisible');
     },
 
     _init: function(params) {
@@ -157,21 +164,44 @@ const MapView = new Lang.Class({
         return view;
     },
 
-    _initLayers: function() {
+    /* create and store a route layer, pass true to get a dashed line */
+    _createRouteLayer: function(dashed) {
         let strokeColor = new Clutter.Color({ red: 0,
                                               blue: 255,
                                               green: 0,
                                               alpha: 100 });
+        let routeLayer = new Champlain.PathLayer({ stroke_width: 5.0,
+                                                   stroke_color: strokeColor });
 
+        Utils.debug('created route layer');
+        if (dashed)
+            routeLayer.set_dash([5, 5]);
+
+        this._routeLayers.push(routeLayer);
+        Utils.debug('pushed layer in array');
+        this.view.add_layer(routeLayer);
+        Utils.debug('added layer');
+        return routeLayer;
+    },
+
+    _clearRouteLayers: function() {
+        Utils.debug('_clearRouteLayers');
+        this._routeLayers.forEach((function(routeLayer) {
+            Utils.debug('remove layer');
+            routeLayer.remove_all();
+            routeLayer.visible = false;
+            this.view.remove_layer(routeLayer);
+        }).bind(this));
+
+        Utils.debug('clear array');
+        this._routeLayers = [];
+    },
+
+    _initLayers: function() {
         let mode = Champlain.SelectionMode.SINGLE;
 
         this._userLocationLayer = new Champlain.MarkerLayer({ selection_mode: mode });
         this.view.add_layer(this._userLocationLayer);
-
-        this._routeLayer = new Champlain.PathLayer({ stroke_width: 5.0,
-                                                     stroke_color: strokeColor });
-        this.view.add_layer(this._routeLayer);
-
 
         this._placeLayer = new Champlain.MarkerLayer({ selection_mode: mode });
         this.view.add_layer(this._placeLayer);
@@ -185,15 +215,23 @@ const MapView = new Lang.Class({
         ShapeLayer.SUPPORTED_TYPES.push(GeoJSONShapeLayer.GeoJSONShapeLayer);
         ShapeLayer.SUPPORTED_TYPES.push(KmlShapeLayer.KmlShapeLayer);
         ShapeLayer.SUPPORTED_TYPES.push(GpxShapeLayer.GpxShapeLayer);
+
+        this._routeLayers = [];
     },
 
     _connectRouteSignals: function() {
         let route = Application.routeService.route;
+        let transitPlan = Application.openTripPlanner.plan;
         let query = Application.routeQuery;
 
         route.connect('update', this.showRoute.bind(this, route));
         route.connect('reset', (function() {
-            this._routeLayer.remove_all();
+            this._clearRouteLayers();
+            this._instructionMarkerLayer.remove_all();
+        }).bind(this));
+        transitPlan.connect('update', this._showTransitPlan.bind(this, transitPlan));
+        transitPlan.connect('reset', (function() {
+            this._clearRouteLayers();
             this._instructionMarkerLayer.remove_all();
         }).bind(this));
 
@@ -365,6 +403,8 @@ const MapView = new Lang.Class({
             return;
         }
 
+        Utils.debug('gotoBBox');
+
         let [lat, lon] = bbox.get_center();
         let place = new Place.Place({
             location: new Location.Location({ latitude  : lat,
@@ -375,6 +415,7 @@ const MapView = new Lang.Class({
                                                     right  : bbox.right })
         });
         new MapWalker.MapWalker(place, this).goTo(true, linear);
+        Utils.debug('end gotoBBox');
     },
 
     showTurnPoint: function(turnPoint) {
@@ -452,12 +493,14 @@ const MapView = new Lang.Class({
     },
 
     showRoute: function(route) {
-        this._routeLayer.remove_all();
+        let routeLayer;
+
+        this._clearRouteLayers();
         this._placeLayer.remove_all();
 
+        routeLayer = this._createRouteLayer(false);
+        route.path.forEach(routeLayer.add_node.bind(routeLayer));
         this.routeVisible = true;
-
-        route.path.forEach(this._routeLayer.add_node.bind(this._routeLayer));
 
         this._showDestinationTurnpoints();
         this.gotoBBox(route.bbox);
@@ -479,6 +522,53 @@ const MapView = new Lang.Class({
                 pointIndex++;
             }
         }, this);
+    },
+
+    _showTransitItinerary: function(itinerary) {
+        this._clearRouteLayers();
+        this._placeLayer.remove_all();
+        this._instructionMarkerLayer.remove_all();
+
+        for (let index = 0; index < itinerary.legs.length; index++) {
+            let leg = itinerary.legs[index];
+            let routeLayer = this._createRouteLayer(!leg.transit);
+
+            /* if this is a walking leg and not at the start, "stitch" it
+             * together with the end point of the previous leg, as the walk
+             * route might not reach all the way */
+            if (index > 0 && !leg.transit) {
+                let previousLeg = itinerary.legs[index - 1];
+                let lastPoint =
+                    previousLeg.polyline[previousLeg.polyline.length - 1];
+
+                routeLayer.add_node(lastPoint);
+            }
+
+            leg.polyline.forEach(routeLayer.add_node.bind(routeLayer));
+
+            /* like above, "stitch" the route segment with the next one if it's
+             * a walking leg, and not the last one */
+            if (index < itinerary.legs.length - 1 && !leg.transit) {
+                let nextLeg = itinerary.legs[index + 1];
+                let firstPoint = nextLeg.polyline[0];
+
+                routeLayer.add_node(firstPoint);
+            }
+        }
+        itinerary.legs.forEach((function(leg) {
+            let routeLayer = this._createRouteLayer(!leg.transit);
+
+
+
+            leg.polyline.forEach(routeLayer.add_node.bind(routeLayer));
+        }).bind(this));
+        this.routeVisible = true;
+    },
+
+    _showTransitPlan: function(plan) {
+        /* show first available itinerary on search result */
+        this._showTransitItinerary(plan.itineraries[0]);
+        this.gotoBBox(plan.bbox);
     },
 
     _onViewMoved: function() {
