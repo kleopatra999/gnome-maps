@@ -388,3 +388,37 @@ function normalizeString(string) {
     let normalized = GLib.utf8_normalize(string, -1, GLib.NormalizeMode.ALL);
     return normalized.replace(ACCENTS_REGEX, '');
 }
+
+/**
+ * Returns the relative luminance (0.0 - 1.0) of a color, expressed in HTML
+ * notation (i.e. ffffff for white) according to the W3C WCAG definition:
+ * https://www.w3.org/WAI/GL/wiki/Relative_luminance
+ */
+function relativeLuminance(color) {
+    let rsRGB = parseInt(color.substring(0, 2), 16) / 255;
+    let gsRGB = parseInt(color.substring(2, 4), 16) / 255;
+    let bsRGB = parseInt(color.substring(4, 6), 16) / 255;
+    let r = rsRGB <= 0.03928 ?
+            rsRGB / 12.92 : Math.pow(((rsRGB + 0.055) / 1.055), 2.4);
+    let g = gsRGB <= 0.03928 ?
+            gsRGB / 12.92 : Math.pow(((gsRGB + 0.055) / 1.055), 2.4);
+    let b = bsRGB <= 0.03928 ?
+            bsRGB / 12.92 : Math.pow(((bsRGB + 0.055) / 1.055), 2.4);
+
+    return 0.216 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/**
+ * Returns the contrast ratio between two colors, expressed in HTML notation
+ * (i.e. ffffff for white) according to the W3C WCAG defintion:
+ * https://www.w3.org/WAI/GL/wiki/Contrast_ratio
+ */
+function contrastRatio(color1, color2) {
+    let lc1 = relativeLuminance(color1);
+    let lc2 = relativeLuminance(color2);
+    /* order by luminance, lighter before darker */
+    let l1 = Math.max(lc1, lc2);
+    let l2 = Math.min(lc1, lc2);
+
+    return (l1 + 0.05) / (l2 + 0.05);
+}
